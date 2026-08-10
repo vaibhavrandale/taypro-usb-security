@@ -7,8 +7,7 @@
 $ErrorActionPreference = "Stop"
 
 $InstallPath = "C:\ProgramData\Taypro\USBSecurity"
-
-$TaskName = "Taypro USB Security Monitor"
+$TaskName    = "Taypro USB Security Monitor"
 
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
@@ -20,25 +19,77 @@ Write-Host ""
 # CHECK ADMIN
 # ==========================================
 
+Write-Host "Checking administrator privileges..."
+
 $CurrentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 
-$Principal = New-Object Security.Principal.WindowsPrincipal(
+$AdminPrincipal = New-Object Security.Principal.WindowsPrincipal(
     $CurrentIdentity
 )
 
-if (-not $Principal.IsInRole(
+if (-not $AdminPrincipal.IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator
 )) {
 
+    Write-Host ""
     Write-Host "ERROR: Please run PowerShell as Administrator." -ForegroundColor Red
+    Write-Host ""
 
     exit 1
 }
+
+Write-Host "Administrator privileges confirmed." -ForegroundColor Green
+
+
+# ==========================================
+# SOURCE DIRECTORY
+# ==========================================
+
+$SourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+Write-Host ""
+Write-Host "Source directory:"
+Write-Host $SourceRoot
+
+
+# ==========================================
+# CHECK REQUIRED FILES
+# ==========================================
+
+Write-Host ""
+Write-Host "Checking installation files..."
+
+$MonitorScript = Join-Path $SourceRoot "USB-SecurityAlert.ps1"
+$ConfigSource  = Join-Path $SourceRoot "config\settings.json"
+
+if (-not (Test-Path $MonitorScript)) {
+
+    Write-Host ""
+    Write-Host "ERROR: USB-SecurityAlert.ps1 not found." -ForegroundColor Red
+    Write-Host "Expected:"
+    Write-Host $MonitorScript
+
+    exit 1
+}
+
+if (-not (Test-Path $ConfigSource)) {
+
+    Write-Host ""
+    Write-Host "ERROR: config\settings.json not found." -ForegroundColor Red
+    Write-Host "Expected:"
+    Write-Host $ConfigSource
+
+    exit 1
+}
+
+Write-Host "Required files found." -ForegroundColor Green
+
 
 # ==========================================
 # CREATE DIRECTORY
 # ==========================================
 
+Write-Host ""
 Write-Host "Creating installation directory..."
 
 New-Item `
@@ -46,48 +97,139 @@ New-Item `
     -Path $InstallPath `
     -Force | Out-Null
 
+Write-Host "Installation directory:"
+Write-Host $InstallPath
+
+
 # ==========================================
 # COPY FILES
 # ==========================================
 
-$SourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+Write-Host ""
+Write-Host "Copying files..."
+
+$MonitorDestination = Join-Path $InstallPath "USB-SecurityAlert.ps1"
+$ConfigDestination  = Join-Path $InstallPath "settings.json"
 
 Copy-Item `
-    "$SourceRoot\USB-SecurityAlert.ps1" `
-    "$InstallPath\USB-SecurityAlert.ps1" `
+    -Path $MonitorScript `
+    -Destination $MonitorDestination `
     -Force
 
 Copy-Item `
-    "$SourceRoot\config\settings.json" `
-    "$InstallPath\settings.json" `
+    -Path $ConfigSource `
+    -Destination $ConfigDestination `
     -Force
+
+Write-Host "Files copied successfully." -ForegroundColor Green
+
 
 # ==========================================
 # LOAD CONFIG
 # ==========================================
 
-$Config = Get-Content `
-    "$InstallPath\settings.json" `
-    -Raw |
-    ConvertFrom-Json
+Write-Host ""
+Write-Host "Loading configuration..."
+
+try {
+
+    $Config = Get-Content `
+        -Path $ConfigDestination `
+        -Raw |
+        ConvertFrom-Json
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "ERROR: Unable to read settings.json." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+
+    exit 1
+}
+
+
+# ==========================================
+# DISPLAY CONFIG
+# ==========================================
 
 Write-Host ""
+Write-Host "=========================================="
+Write-Host " SMTP CONFIGURATION"
+Write-Host "=========================================="
+
 Write-Host "SMTP Server : $($Config.SmtpServer)"
 Write-Host "SMTP Port   : $($Config.SmtpPort)"
 Write-Host "SMTP User   : $($Config.AuthUser)"
 Write-Host "From        : $($Config.From)"
 Write-Host "Alert To    : $($Config.To)"
+
 Write-Host ""
+
 
 # ==========================================
 # REQUEST SMTP PASSWORD
 # ==========================================
 
+Write-Host "Requesting SMTP password..."
+
 $Credential = Get-Credential `
     -UserName $Config.AuthUser `
     -Message "Enter the Hostinger SMTP password"
 
+if ($null -eq $Credential) {
+
+    Write-Host ""
+    Write-Host "ERROR: SMTP credential was not provided." -ForegroundColor Red
+
+    exit 1
+}
+
 $PlainPassword = $Credential.GetNetworkCredential().Password
+
+if ([string]::IsNullOrWhiteSpace($PlainPassword)) {
+
+    Write-Host ""
+    Write-Host "ERROR: SMTP password cannot be empty." -ForegroundColor Red
+
+    exit 1
+}
+
+
+# ==========================================
+# LOAD WINDOWS DPAPI
+# ==========================================
+
+Write-Host ""
+Write-Host "Loading Windows DPAPI encryption support..."
+
+try {
+
+    Add-Type `
+        -AssemblyName System.Security.Cryptography.ProtectedData `
+        -ErrorAction Stop
+
+    Write-Host "DPAPI loaded successfully." -ForegroundColor Green
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "ERROR: Unable to load System.Security.Cryptography.ProtectedData." -ForegroundColor Red
+    Write-Host ""
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ""
+
+    Write-Host "PowerShell information:" -ForegroundColor Yellow
+    Write-Host "PowerShell Version : $($PSVersionTable.PSVersion)"
+    Write-Host "PowerShell Edition : $($PSVersionTable.PSEdition)"
+    Write-Host "OS                 : $([System.Environment]::OSVersion.VersionString)"
+
+    $PlainPassword = $null
+
+    exit 1
+}
+
 
 # ==========================================
 # ENCRYPT PASSWORD USING MACHINE DPAPI
@@ -96,84 +238,154 @@ $PlainPassword = $Credential.GetNetworkCredential().Password
 Write-Host ""
 Write-Host "Encrypting SMTP credential..."
 
-$PasswordBytes = [System.Text.Encoding]::UTF8.GetBytes(
-    $PlainPassword
-)
+try {
 
-$EncryptedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
-    $PasswordBytes,
-    $null,
-    [System.Security.Cryptography.DataProtectionScope]::LocalMachine
-)
+    $PasswordBytes = [System.Text.Encoding]::UTF8.GetBytes(
+        $PlainPassword
+    )
 
-$EncryptedPassword = [Convert]::ToBase64String(
-    $EncryptedBytes
-)
+    $EncryptedBytes = [
+        System.Security.Cryptography.ProtectedData
+    ]::Protect(
+        $PasswordBytes,
+        $null,
+        [
+            System.Security.Cryptography.DataProtectionScope
+        ]::LocalMachine
+    )
 
-$CredentialFile = "$InstallPath\smtp-secret.dat"
+    $EncryptedPassword = [
+        Convert
+    ]::ToBase64String(
+        $EncryptedBytes
+    )
+
+    Write-Host "SMTP credential encrypted successfully." -ForegroundColor Green
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "ERROR: Failed to encrypt SMTP credential." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+
+    $PlainPassword = $null
+    $PasswordBytes = $null
+
+    exit 1
+}
+
+
+# ==========================================
+# SAVE ENCRYPTED PASSWORD
+# ==========================================
+
+$CredentialFile = Join-Path $InstallPath "smtp-secret.dat"
+
+Write-Host ""
+Write-Host "Saving encrypted SMTP credential..."
 
 Set-Content `
     -Path $CredentialFile `
     -Value $EncryptedPassword `
-    -Encoding ASCII
+    -Encoding ASCII `
+    -Force
 
-# Clear password variable
+Write-Host "Encrypted credential saved." -ForegroundColor Green
 
-$PlainPassword = $null
-$PasswordBytes = $null
 
 # ==========================================
-# SET FILE PERMISSIONS
+# CLEAR PASSWORD FROM MEMORY
 # ==========================================
 
+$PlainPassword     = $null
+$PasswordBytes     = $null
+$EncryptedBytes    = $null
+$EncryptedPassword = $null
+$Credential        = $null
+
+
+# ==========================================
+# SET DIRECTORY PERMISSIONS
+# ==========================================
+
+Write-Host ""
 Write-Host "Applying security permissions..."
 
+# Remove inherited permissions
 icacls $InstallPath /inheritance:r | Out-Null
 
+# SYSTEM full access
 icacls $InstallPath `
     /grant "SYSTEM:(OI)(CI)(F)" | Out-Null
 
+# Administrators full access
 icacls $InstallPath `
     /grant "Administrators:(OI)(CI)(F)" | Out-Null
 
+# Remove standard user access
 icacls $InstallPath `
     /remove "Users" | Out-Null
 
 icacls $InstallPath `
     /remove "Authenticated Users" | Out-Null
 
+Write-Host "Directory permissions configured." -ForegroundColor Green
+
+
 # ==========================================
-# PROTECT INDIVIDUAL FILES
+# PROTECT MONITOR SCRIPT
 # ==========================================
 
-icacls "$InstallPath\USB-SecurityAlert.ps1" `
+Write-Host ""
+Write-Host "Protecting USB monitor script..."
+
+icacls $MonitorDestination `
     /inheritance:r | Out-Null
 
-icacls "$InstallPath\USB-SecurityAlert.ps1" `
+icacls $MonitorDestination `
     /grant "SYSTEM:(F)" `
     /grant "Administrators:(F)" | Out-Null
 
-icacls "$InstallPath\settings.json" `
+
+# ==========================================
+# PROTECT CONFIGURATION
+# ==========================================
+
+Write-Host "Protecting settings.json..."
+
+icacls $ConfigDestination `
     /inheritance:r | Out-Null
 
-icacls "$InstallPath\settings.json" `
+icacls $ConfigDestination `
     /grant "SYSTEM:(F)" `
     /grant "Administrators:(F)" | Out-Null
 
-icacls "$InstallPath\smtp-secret.dat" `
+
+# ==========================================
+# PROTECT SMTP SECRET
+# ==========================================
+
+Write-Host "Protecting SMTP credential..."
+
+icacls $CredentialFile `
     /inheritance:r | Out-Null
 
-icacls "$InstallPath\smtp-secret.dat" `
+icacls $CredentialFile `
     /grant "SYSTEM:(F)" `
     /grant "Administrators:(F)" | Out-Null
+
 
 # ==========================================
 # CREATE LOG FILE
 # ==========================================
 
-$LogFile = "$InstallPath\USBSecurity.log"
+$LogFile = Join-Path $InstallPath "USBSecurity.log"
 
-if (!(Test-Path $LogFile)) {
+Write-Host ""
+Write-Host "Creating log file..."
+
+if (-not (Test-Path $LogFile)) {
 
     New-Item `
         -ItemType File `
@@ -181,6 +393,7 @@ if (!(Test-Path $LogFile)) {
         -Force | Out-Null
 }
 
+# Protect log file
 icacls $LogFile `
     /inheritance:r | Out-Null
 
@@ -188,29 +401,56 @@ icacls $LogFile `
     /grant "SYSTEM:(F)" `
     /grant "Administrators:(F)" | Out-Null
 
+Write-Host "Log file created." -ForegroundColor Green
+
+
 # ==========================================
-# REMOVE OLD TASK
+# REMOVE OLD SCHEDULED TASK
 # ==========================================
 
-Unregister-ScheduledTask `
+Write-Host ""
+Write-Host "Removing existing scheduled task if present..."
+
+$ExistingTask = Get-ScheduledTask `
     -TaskName $TaskName `
-    -Confirm:$false `
     -ErrorAction SilentlyContinue
+
+if ($null -ne $ExistingTask) {
+
+    Stop-ScheduledTask `
+        -TaskName $TaskName `
+        -ErrorAction SilentlyContinue
+
+    Unregister-ScheduledTask `
+        -TaskName $TaskName `
+        -Confirm:$false `
+        -ErrorAction SilentlyContinue
+
+    Write-Host "Existing task removed." -ForegroundColor Yellow
+}
+else {
+
+    Write-Host "No existing task found."
+}
+
 
 # ==========================================
 # CREATE STARTUP TASK
 # ==========================================
 
+Write-Host ""
 Write-Host "Creating Windows startup task..."
 
+$PowerShellPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+
 $Action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$InstallPath\USB-SecurityAlert.ps1`""
+    -Execute $PowerShellPath `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$MonitorDestination`""
 
 $Trigger = New-ScheduledTaskTrigger `
     -AtStartup
 
-$Principal = New-ScheduledTaskPrincipal `
+$TaskPrincipal = New-ScheduledTaskPrincipal `
     -UserId "SYSTEM" `
     -LogonType ServiceAccount `
     -RunLevel Highest
@@ -218,34 +458,61 @@ $Principal = New-ScheduledTaskPrincipal `
 $Settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1)
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit ([TimeSpan]::Zero)
 
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $Action `
     -Trigger $Trigger `
-    -Principal $Principal `
+    -Principal $TaskPrincipal `
     -Settings $Settings `
     -Description "Taypro USB Security Monitor" `
     -Force | Out-Null
 
+Write-Host "Scheduled task created successfully." -ForegroundColor Green
+
+
 # ==========================================
-# START NOW
+# START MONITOR NOW
 # ==========================================
 
-Write-Host "Starting USB monitor..."
+Write-Host ""
+Write-Host "Starting USB Security Monitor..."
 
 Start-ScheduledTask `
     -TaskName $TaskName
 
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 5
+
 
 # ==========================================
-# VERIFY
+# VERIFY TASK
 # ==========================================
+
+Write-Host ""
+Write-Host "Verifying scheduled task..."
 
 $Task = Get-ScheduledTask `
-    -TaskName $TaskName
+    -TaskName $TaskName `
+    -ErrorAction SilentlyContinue
+
+if ($null -eq $Task) {
+
+    Write-Host ""
+    Write-Host "ERROR: Scheduled task was not created." -ForegroundColor Red
+
+    exit 1
+}
+
+
+# ==========================================
+# CHECK TASK INFO
+# ==========================================
+
+$TaskInfo = Get-ScheduledTaskInfo `
+    -TaskName $TaskName `
+    -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Green
@@ -254,10 +521,38 @@ Write-Host "==========================================" -ForegroundColor Green
 Write-Host ""
 
 Write-Host "Installation : $InstallPath"
+Write-Host "Monitor      : $MonitorDestination"
+Write-Host "Config       : $ConfigDestination"
+Write-Host "Credential   : $CredentialFile"
+Write-Host "Log          : $LogFile"
 Write-Host "Task         : $TaskName"
 Write-Host "Task User    : SYSTEM"
-Write-Host "State        : $($Task.State)"
+Write-Host "Task State   : $($Task.State)"
+
+if ($null -ne $TaskInfo) {
+
+    Write-Host "Last Run     : $($TaskInfo.LastRunTime)"
+    Write-Host "Last Result  : $($TaskInfo.LastTaskResult)"
+}
+
 Write-Host ""
 
+# ==========================================
+# CHECK LOG
+# ==========================================
+
+if (Test-Path $LogFile) {
+
+    Write-Host "Recent USB Security log:" -ForegroundColor Cyan
+    Write-Host "------------------------------------------"
+
+    Get-Content `
+        -Path $LogFile `
+        -Tail 10
+
+    Write-Host "------------------------------------------"
+}
+
+Write-Host ""
 Write-Host "USB Security Monitor is now active." -ForegroundColor Green
 Write-Host ""

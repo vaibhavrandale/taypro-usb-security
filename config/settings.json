@@ -1,0 +1,7 @@
+{
+    "SmtpServer": "smtp.hostinger.com",
+    "SmtpPort": 587,
+    "From": "usbalert@tayproindia.com",
+    "To": "satyam.a@taypro.in",
+    "AuthUser": "usbalert@tayproindia.com"
+}

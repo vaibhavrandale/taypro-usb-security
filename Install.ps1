@@ -1,6 +1,4 @@
-from pathlib import Path
-
-content = r'''#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 
 # ==========================================
 # TAYPRO USB SECURITY INSTALLER
@@ -481,8 +479,3 @@ if (Test-Path $LogFile) {
 Write-Host ""
 Write-Host "USB Security Monitor is now active." -ForegroundColor Green
 Write-Host ""
-'''
-
-path = Path("/mnt/data/Install.ps1")
-path.write_text(content, encoding="utf-8")
-print(f"Created: {path}")

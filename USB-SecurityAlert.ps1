@@ -1,16 +1,26 @@
+#Requires -Version 5.1
+
 # ==========================================
 # TAYPRO USB SECURITY MONITOR
+# USB STORAGE INSERTION ALERT
 # ==========================================
 
-$ErrorActionPreference = "Stop"
-
-$BasePath       = "C:\ProgramData\Taypro\USBSecurity"
-$ConfigFile     = Join-Path $BasePath "settings.json"
+$BasePath      = "C:\ProgramData\Taypro\USBSecurity"
+$ConfigFile    = Join-Path $BasePath "settings.json"
 $CredentialFile = Join-Path $BasePath "smtp-secret.dat"
-$LogFile        = Join-Path $BasePath "USBSecurity.log"
+$LogFile       = Join-Path $BasePath "USBSecurity.log"
+
+# Polling interval in seconds
+$PollIntervalSeconds = 2
+
+# Number of attempts to wait for the USB volume to become ready
+$VolumeReadyAttempts = 10
+
+# Delay between volume-ready attempts
+$VolumeReadyDelaySeconds = 1
 
 # ==========================================
-# ENSURE BASE DIRECTORY EXISTS
+# CREATE BASE DIRECTORY
 # ==========================================
 
 if (-not (Test-Path $BasePath)) {
@@ -23,45 +33,21 @@ if (-not (Test-Path $BasePath)) {
 
 function Write-Log {
     param(
+        [Parameter(Mandatory = $true)]
         [string]$Message
     )
 
     try {
         $Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        Add-Content -Path $LogFile -Value "[$Time] $Message"
+
+        Add-Content `
+            -Path $LogFile `
+            -Value "[$Time] $Message" `
+            -ErrorAction Stop
     }
     catch {
-        # Do not terminate the USB monitor because logging failed.
+        # Do not terminate the USB monitor if logging fails.
     }
-}
-
-# ==========================================
-# STARTUP
-# ==========================================
-
-Write-Log "=========================================="
-Write-Log "TAYPRO USB SECURITY MONITOR STARTING"
-Write-Log "Computer: $env:COMPUTERNAME"
-Write-Log "Process User: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-Write-Log "PowerShell: $($PSVersionTable.PSVersion)"
-Write-Log "=========================================="
-
-# ==========================================
-# LOAD WINDOWS DPAPI
-# ==========================================
-
-try {
-    # Required for Windows PowerShell 5.1.
-    Add-Type -AssemblyName System.Security -ErrorAction Stop
-
-    $null = [System.Security.Cryptography.ProtectedData]
-    $null = [System.Security.Cryptography.DataProtectionScope]
-
-    Write-Log "DPAPI loaded successfully."
-}
-catch {
-    Write-Log "ERROR loading DPAPI: $($_.Exception.Message)"
-    exit 1
 }
 
 # ==========================================
@@ -69,40 +55,42 @@ catch {
 # ==========================================
 
 if (-not (Test-Path $ConfigFile)) {
-    Write-Log "ERROR: settings.json not found."
+    Write-Log "ERROR: settings.json not found: $ConfigFile"
     exit 1
 }
 
 try {
-    $Config = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+    $Config = Get-Content `
+        -Path $ConfigFile `
+        -Raw `
+        -ErrorAction Stop |
+        ConvertFrom-Json
+
+    if ([string]::IsNullOrWhiteSpace($Config.SmtpServer)) {
+        throw "SmtpServer is missing."
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$Config.SmtpPort)) {
+        throw "SmtpPort is missing."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Config.From)) {
+        throw "From address is missing."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Config.To)) {
+        throw "To address is missing."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Config.AuthUser)) {
+        throw "AuthUser is missing."
+    }
 
     $SmtpServer = [string]$Config.SmtpServer
     $SmtpPort   = [int]$Config.SmtpPort
     $From       = [string]$Config.From
     $To         = [string]$Config.To
     $AuthUser   = [string]$Config.AuthUser
-
-    if ([string]::IsNullOrWhiteSpace($SmtpServer)) {
-        throw "SMTP server is empty."
-    }
-
-    if ($SmtpPort -le 0) {
-        throw "SMTP port is invalid."
-    }
-
-    if ([string]::IsNullOrWhiteSpace($AuthUser)) {
-        throw "SMTP username is empty."
-    }
-
-    if ([string]::IsNullOrWhiteSpace($From)) {
-        throw "From address is empty."
-    }
-
-    if ([string]::IsNullOrWhiteSpace($To)) {
-        throw "To address is empty."
-    }
-
-    Write-Log "Configuration loaded successfully."
 }
 catch {
     Write-Log "ERROR loading configuration: $($_.Exception.Message)"
@@ -114,12 +102,19 @@ catch {
 # ==========================================
 
 if (-not (Test-Path $CredentialFile)) {
-    Write-Log "ERROR: SMTP credential not found."
+    Write-Log "ERROR: SMTP credential not found: $CredentialFile"
     exit 1
 }
 
 try {
-    $EncryptedPassword = (Get-Content -Path $CredentialFile -Raw).Trim()
+    Add-Type -AssemblyName System.Security -ErrorAction Stop
+
+    $EncryptedPassword = (
+        Get-Content `
+            -Path $CredentialFile `
+            -Raw `
+            -ErrorAction Stop
+    ).Trim()
 
     if ([string]::IsNullOrWhiteSpace($EncryptedPassword)) {
         throw "SMTP credential file is empty."
@@ -139,11 +134,9 @@ try {
         throw "Decrypted SMTP password is empty."
     }
 
-    Write-Log "SMTP credential decrypted successfully."
-
-    # Clear intermediate byte arrays.
-    $EncryptedBytes = $null
+    # Clear sensitive intermediate data
     $PasswordBytes = $null
+    $EncryptedBytes = $null
     $EncryptedPassword = $null
 }
 catch {
@@ -152,46 +145,111 @@ catch {
 }
 
 # ==========================================
-# SEND EMAIL
+# GET LOGGED-IN USER
+# ==========================================
+
+function Get-LoggedInUser {
+
+    try {
+        $ComputerSystem = Get-CimInstance `
+            -ClassName Win32_ComputerSystem `
+            -ErrorAction Stop
+
+        if (-not [string]::IsNullOrWhiteSpace($ComputerSystem.UserName)) {
+            return $ComputerSystem.UserName
+        }
+
+        return "No interactive user detected"
+    }
+    catch {
+        return "Unknown"
+    }
+}
+
+# ==========================================
+# GET USB STORAGE DRIVES
+# ==========================================
+
+function Get-USBDrives {
+
+    try {
+
+        $Drives = Get-CimInstance `
+            -ClassName Win32_LogicalDisk `
+            -Filter "DriveType = 2" `
+            -ErrorAction Stop
+
+        if ($null -eq $Drives) {
+            return @()
+        }
+
+        return @($Drives)
+    }
+    catch {
+
+        Write-Log "USB ENUMERATION ERROR: $($_.Exception.Message)"
+
+        return @()
+    }
+}
+
+# ==========================================
+# SEND USB ALERT EMAIL
 # ==========================================
 
 function Send-USBAlert {
+
     param(
+        [Parameter(Mandatory = $true)]
         [string]$DriveLetter,
-        [string]$VolumeName
+
+        [string]$VolumeName,
+
+        [string]$FileSystem,
+
+        [string]$VolumeSerialNumber,
+
+        [string]$SizeGB
     )
 
     $ComputerName = $env:COMPUTERNAME
-
-    try {
-        $UserName = (
-            Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
-        ).UserName
-
-        if ([string]::IsNullOrWhiteSpace($UserName)) {
-            $UserName = "No interactive user"
-        }
-    }
-    catch {
-        $UserName = "Unknown"
-    }
-
+    $UserName = Get-LoggedInUser
     $Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    if ([string]::IsNullOrWhiteSpace($VolumeName)) {
+        $VolumeName = "No label"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($FileSystem)) {
+        $FileSystem = "Unknown"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($VolumeSerialNumber)) {
+        $VolumeSerialNumber = "Unknown"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($SizeGB)) {
+        $SizeGB = "Unknown"
+    }
 
     $Subject = "USB DEVICE DETECTED - $ComputerName"
 
     $Body = @"
 USB SECURITY ALERT
+==================
 
-A USB storage device has been connected.
+A USB storage device has been connected to the computer.
 
-Computer Name : $ComputerName
-Logged-in User: $UserName
-Drive Letter  : $DriveLetter
-Volume Name   : $VolumeName
-Time          : $Time
+Computer Name      : $ComputerName
+Logged-in User     : $UserName
+Drive Letter       : $DriveLetter
+Volume Name        : $VolumeName
+File System        : $FileSystem
+Volume Serial      : $VolumeSerialNumber
+Drive Size         : $SizeGB GB
+Detection Time     : $Time
 
-This is an automated alert generated by Taypro local security policy.
+This is an automated USB security alert generated by Taypro.
 "@
 
     Write-Log "USB DETECTED | Computer=$ComputerName | User=$UserName | Drive=$DriveLetter | Volume=$VolumeName"
@@ -200,8 +258,9 @@ This is an automated alert generated by Taypro local security policy.
     $Message = $null
 
     try {
+
         $SecurePassword = ConvertTo-SecureString `
-            $Password `
+            -String $Password `
             -AsPlainText `
             -Force
 
@@ -211,10 +270,11 @@ This is an automated alert generated by Taypro local security policy.
                 $SecurePassword
             )
 
-        $Smtp = New-Object System.Net.Mail.SmtpClient(
-            $SmtpServer,
-            $SmtpPort
-        )
+        $Smtp = New-Object `
+            System.Net.Mail.SmtpClient(
+                $SmtpServer,
+                $SmtpPort
+            )
 
         $Smtp.EnableSsl = $true
         $Smtp.Timeout = 15000
@@ -227,15 +287,22 @@ This is an automated alert generated by Taypro local security policy.
         $Message.To.Add($To)
         $Message.Subject = $Subject
         $Message.Body = $Body
+        $Message.IsBodyHtml = $false
 
         $Smtp.Send($Message)
 
-        Write-Log "EMAIL SENT SUCCESSFULLY."
+        Write-Log "EMAIL SENT SUCCESSFULLY | Drive=$DriveLetter | To=$To"
+
+        return $true
     }
     catch {
-        Write-Log "EMAIL FAILED: $($_.Exception.Message)"
+
+        Write-Log "EMAIL FAILED | Drive=$DriveLetter | Error=$($_.Exception.Message)"
+
+        return $false
     }
     finally {
+
         if ($Message) {
             $Message.Dispose()
         }
@@ -250,117 +317,174 @@ This is an automated alert generated by Taypro local security policy.
 }
 
 # ==========================================
-# REGISTER USB INSERTION EVENT
+# WAIT FOR USB VOLUME TO BECOME READY
 # ==========================================
 
-$query = @"
-SELECT * FROM Win32_VolumeChangeEvent
-WHERE EventType = 2
-"@
+function Get-ReadyUSBDrive {
 
-try {
-    # Remove any stale subscription created by a previous run in this
-    # PowerShell process/session.
-    Unregister-Event `
-        -SourceIdentifier "TayproUSBDetection" `
-        -ErrorAction SilentlyContinue
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DriveLetter
+    )
 
-    Register-WmiEvent `
-        -Query $query `
-        -SourceIdentifier "TayproUSBDetection" `
-        -Namespace "root\CIMV2" `
-        -ErrorAction Stop | Out-Null
+    for ($Attempt = 1; $Attempt -le $VolumeReadyAttempts; $Attempt++) {
 
-    Write-Log "USB insertion event registered successfully."
-}
-catch {
-    Write-Log "ERROR registering USB event: $($_.Exception.Message)"
-    exit 1
-}
+        try {
 
-# ==========================================
-# MONITOR CLEANUP
-# ==========================================
+            $Drive = Get-CimInstance `
+                -ClassName Win32_LogicalDisk `
+                -Filter "DeviceID='$DriveLetter'" `
+                -ErrorAction Stop
 
-$Cleanup = {
-    try {
-        Unregister-Event `
-            -SourceIdentifier "TayproUSBDetection" `
-            -ErrorAction SilentlyContinue
+            if ($Drive) {
+                return $Drive
+            }
+        }
+        catch {
+            # USB may still be initializing.
+        }
 
-        Remove-Event `
-            -SourceIdentifier "TayproUSBDetection" `
-            -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds $VolumeReadyDelaySeconds
     }
-    catch {
-    }
+
+    return $null
 }
 
 # ==========================================
 # START MONITOR
 # ==========================================
 
+Write-Log "=========================================="
 Write-Log "TAYPRO USB SECURITY MONITOR STARTED"
-Write-Log "Waiting for USB storage device insertion..."
+Write-Log "Computer: $env:COMPUTERNAME"
+Write-Log "Running As: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+Write-Log "Detection Method: USB storage polling"
+Write-Log "Polling Interval: $PollIntervalSeconds seconds"
+Write-Log "=========================================="
 
 # ==========================================
-# CONTINUOUS MONITORING
+# INITIAL USB STATE
 # ==========================================
+
+$KnownDrives = @{}
 
 try {
-    while ($true) {
 
-        try {
-            $Event = Wait-Event `
-                -SourceIdentifier "TayproUSBDetection" `
-                -Timeout 30
+    $InitialDrives = Get-USBDrives
 
-            if ($null -eq $Event) {
+    foreach ($Drive in $InitialDrives) {
+
+        if ($Drive.DeviceID) {
+            $KnownDrives[$Drive.DeviceID] = $true
+
+            Write-Log "INITIAL USB DRIVE | Drive=$($Drive.DeviceID) | Volume=$($Drive.VolumeName)"
+        }
+    }
+
+}
+catch {
+
+    Write-Log "INITIAL USB ENUMERATION ERROR: $($_.Exception.Message)"
+}
+
+Write-Log "USB monitoring loop is active."
+
+# ==========================================
+# CONTINUOUS USB MONITOR
+# ==========================================
+
+while ($true) {
+
+    try {
+
+        $CurrentDrives = Get-USBDrives
+
+        $CurrentDriveMap = @{}
+
+        foreach ($Drive in $CurrentDrives) {
+
+            $DriveLetter = [string]$Drive.DeviceID
+
+            if ([string]::IsNullOrWhiteSpace($DriveLetter)) {
                 continue
             }
 
-            try {
-                $DriveLetter = $Event.SourceEventArgs.NewEvent.DriveName
+            $CurrentDriveMap[$DriveLetter] = $true
 
-                Start-Sleep -Seconds 2
+            # ==========================================
+            # NEW USB DRIVE DETECTED
+            # ==========================================
 
-                if (-not [string]::IsNullOrWhiteSpace($DriveLetter)) {
+            if (-not $KnownDrives.ContainsKey($DriveLetter)) {
 
-                    $SafeDriveLetter = $DriveLetter.Replace("'", "''")
+                Write-Log "NEW USB DRIVE FOUND | Drive=$DriveLetter"
 
-                    $Volume = Get-CimInstance `
-                        Win32_LogicalDisk `
-                        -Filter "DeviceID='$SafeDriveLetter'" `
-                        -ErrorAction SilentlyContinue
+                # Give Windows time to finish mounting the device.
+                $ReadyDrive = Get-ReadyUSBDrive `
+                    -DriveLetter $DriveLetter
 
-                    if ($Volume) {
+                if ($ReadyDrive) {
 
-                        $VolumeName = [string]$Volume.VolumeName
+                    $VolumeName = [string]$ReadyDrive.VolumeName
+                    $FileSystem = [string]$ReadyDrive.FileSystem
+                    $Serial = [string]$ReadyDrive.VolumeSerialNumber
 
-                        Send-USBAlert `
-                            -DriveLetter $DriveLetter `
-                            -VolumeName $VolumeName
+                    $SizeGB = "Unknown"
+
+                    if ($ReadyDrive.Size) {
+                        $SizeGB = [math]::Round(
+                            ($ReadyDrive.Size / 1GB),
+                            2
+                        )
                     }
-                    else {
-                        Write-Log "USB event received but logical disk was not available: $DriveLetter"
-                    }
+
+                    Write-Log "USB READY | Drive=$DriveLetter | Volume=$VolumeName | FileSystem=$FileSystem | SizeGB=$SizeGB"
+
+                    Send-USBAlert `
+                        -DriveLetter $DriveLetter `
+                        -VolumeName $VolumeName `
+                        -FileSystem $FileSystem `
+                        -VolumeSerialNumber $Serial `
+                        -SizeGB $SizeGB | Out-Null
+                }
+                else {
+
+                    Write-Log "USB DETECTED BUT VOLUME NOT READY | Drive=$DriveLetter"
                 }
             }
-            catch {
-                Write-Log "USB EVENT ERROR: $($_.Exception.Message)"
-            }
+        }
 
-            Remove-Event `
-                -SourceIdentifier "TayproUSBDetection" `
-                -ErrorAction SilentlyContinue
+        # ==========================================
+        # REMOVE DISCONNECTED DRIVES
+        # ==========================================
+
+        $DisconnectedDrives = @(
+            $KnownDrives.Keys |
+            Where-Object {
+                -not $CurrentDriveMap.ContainsKey($_)
+            }
+        )
+
+        foreach ($DisconnectedDrive in $DisconnectedDrives) {
+
+            Write-Log "USB REMOVED | Drive=$DisconnectedDrive"
+
+            $KnownDrives.Remove($DisconnectedDrive)
         }
-        catch {
-            Write-Log "MONITOR ERROR: $($_.Exception.Message)"
-            Start-Sleep -Seconds 5
+
+        # ==========================================
+        # UPDATE STATE
+        # ==========================================
+
+        foreach ($DriveLetter in $CurrentDriveMap.Keys) {
+            $KnownDrives[$DriveLetter] = $true
         }
+
     }
-}
-finally {
-    & $Cleanup
-    Write-Log "TAYPRO USB SECURITY MONITOR STOPPED"
+    catch {
+
+        Write-Log "MONITOR ERROR: $($_.Exception.Message)"
+    }
+
+    Start-Sleep -Seconds $PollIntervalSeconds
 }

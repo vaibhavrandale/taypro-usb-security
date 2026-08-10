@@ -2,11 +2,20 @@
 # TAYPRO USB SECURITY MONITOR
 # ==========================================
 
-$BasePath = "C:\ProgramData\Taypro\USBSecurity"
+$ErrorActionPreference = "Stop"
 
-$ConfigFile     = "$BasePath\settings.json"
-$CredentialFile = "$BasePath\smtp-secret.dat"
-$LogFile        = "$BasePath\USBSecurity.log"
+$BasePath       = "C:\ProgramData\Taypro\USBSecurity"
+$ConfigFile     = Join-Path $BasePath "settings.json"
+$CredentialFile = Join-Path $BasePath "smtp-secret.dat"
+$LogFile        = Join-Path $BasePath "USBSecurity.log"
+
+# ==========================================
+# ENSURE BASE DIRECTORY EXISTS
+# ==========================================
+
+if (-not (Test-Path $BasePath)) {
+    New-Item -ItemType Directory -Path $BasePath -Force | Out-Null
+}
 
 # ==========================================
 # LOG FUNCTION
@@ -17,60 +26,106 @@ function Write-Log {
         [string]$Message
     )
 
-    $Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    try {
+        $Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path $LogFile -Value "[$Time] $Message"
+    }
+    catch {
+        # Do not terminate the USB monitor because logging failed.
+    }
+}
 
-    Add-Content -Path $LogFile `
-        -Value "[$Time] $Message"
+# ==========================================
+# STARTUP
+# ==========================================
+
+Write-Log "=========================================="
+Write-Log "TAYPRO USB SECURITY MONITOR STARTING"
+Write-Log "Computer: $env:COMPUTERNAME"
+Write-Log "Process User: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+Write-Log "PowerShell: $($PSVersionTable.PSVersion)"
+Write-Log "=========================================="
+
+# ==========================================
+# LOAD WINDOWS DPAPI
+# ==========================================
+
+try {
+    # Required for Windows PowerShell 5.1.
+    Add-Type -AssemblyName System.Security -ErrorAction Stop
+
+    $null = [System.Security.Cryptography.ProtectedData]
+    $null = [System.Security.Cryptography.DataProtectionScope]
+
+    Write-Log "DPAPI loaded successfully."
+}
+catch {
+    Write-Log "ERROR loading DPAPI: $($_.Exception.Message)"
+    exit 1
 }
 
 # ==========================================
 # LOAD CONFIGURATION
 # ==========================================
 
-if (!(Test-Path $ConfigFile)) {
-
+if (-not (Test-Path $ConfigFile)) {
     Write-Log "ERROR: settings.json not found."
-
     exit 1
 }
 
 try {
+    $Config = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
 
-    $Config = Get-Content $ConfigFile -Raw |
-        ConvertFrom-Json
+    $SmtpServer = [string]$Config.SmtpServer
+    $SmtpPort   = [int]$Config.SmtpPort
+    $From       = [string]$Config.From
+    $To         = [string]$Config.To
+    $AuthUser   = [string]$Config.AuthUser
 
+    if ([string]::IsNullOrWhiteSpace($SmtpServer)) {
+        throw "SMTP server is empty."
+    }
+
+    if ($SmtpPort -le 0) {
+        throw "SMTP port is invalid."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($AuthUser)) {
+        throw "SMTP username is empty."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($From)) {
+        throw "From address is empty."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($To)) {
+        throw "To address is empty."
+    }
+
+    Write-Log "Configuration loaded successfully."
 }
 catch {
-
     Write-Log "ERROR loading configuration: $($_.Exception.Message)"
-
     exit 1
 }
-
-$SmtpServer = $Config.SmtpServer
-$SmtpPort   = [int]$Config.SmtpPort
-$From       = $Config.From
-$To         = $Config.To
-$AuthUser   = $Config.AuthUser
 
 # ==========================================
 # LOAD ENCRYPTED SMTP PASSWORD
 # ==========================================
 
-if (!(Test-Path $CredentialFile)) {
-
+if (-not (Test-Path $CredentialFile)) {
     Write-Log "ERROR: SMTP credential not found."
-
     exit 1
 }
 
 try {
+    $EncryptedPassword = (Get-Content -Path $CredentialFile -Raw).Trim()
 
-    $EncryptedPassword = Get-Content $CredentialFile -Raw
+    if ([string]::IsNullOrWhiteSpace($EncryptedPassword)) {
+        throw "SMTP credential file is empty."
+    }
 
-    $EncryptedBytes = [Convert]::FromBase64String(
-        $EncryptedPassword
-    )
+    $EncryptedBytes = [Convert]::FromBase64String($EncryptedPassword)
 
     $PasswordBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
         $EncryptedBytes,
@@ -78,15 +133,21 @@ try {
         [System.Security.Cryptography.DataProtectionScope]::LocalMachine
     )
 
-    $Password = [System.Text.Encoding]::UTF8.GetString(
-        $PasswordBytes
-    )
+    $Password = [System.Text.Encoding]::UTF8.GetString($PasswordBytes)
 
+    if ([string]::IsNullOrWhiteSpace($Password)) {
+        throw "Decrypted SMTP password is empty."
+    }
+
+    Write-Log "SMTP credential decrypted successfully."
+
+    # Clear intermediate byte arrays.
+    $EncryptedBytes = $null
+    $PasswordBytes = $null
+    $EncryptedPassword = $null
 }
 catch {
-
     Write-Log "ERROR decrypting SMTP password: $($_.Exception.Message)"
-
     exit 1
 }
 
@@ -95,7 +156,6 @@ catch {
 # ==========================================
 
 function Send-USBAlert {
-
     param(
         [string]$DriveLetter,
         [string]$VolumeName
@@ -104,14 +164,15 @@ function Send-USBAlert {
     $ComputerName = $env:COMPUTERNAME
 
     try {
-
         $UserName = (
-            Get-CimInstance Win32_ComputerSystem
+            Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
         ).UserName
 
+        if ([string]::IsNullOrWhiteSpace($UserName)) {
+            $UserName = "No interactive user"
+        }
     }
     catch {
-
         $UserName = "Unknown"
     }
 
@@ -139,7 +200,6 @@ This is an automated alert generated by Taypro local security policy.
     $Message = $null
 
     try {
-
         $SecurePassword = ConvertTo-SecureString `
             $Password `
             -AsPlainText `
@@ -171,14 +231,11 @@ This is an automated alert generated by Taypro local security policy.
         $Smtp.Send($Message)
 
         Write-Log "EMAIL SENT SUCCESSFULLY."
-
     }
     catch {
-
         Write-Log "EMAIL FAILED: $($_.Exception.Message)"
     }
     finally {
-
         if ($Message) {
             $Message.Dispose()
         }
@@ -186,20 +243,14 @@ This is an automated alert generated by Taypro local security policy.
         if ($Smtp) {
             $Smtp.Dispose()
         }
+
+        $SecurePassword = $null
+        $Credential = $null
     }
 }
 
 # ==========================================
-# START MONITOR
-# ==========================================
-
-Write-Log "=========================================="
-Write-Log "TAYPRO USB SECURITY MONITOR STARTED"
-Write-Log "Computer: $env:COMPUTERNAME"
-Write-Log "=========================================="
-
-# ==========================================
-# USB INSERTION EVENT
+# REGISTER USB INSERTION EVENT
 # ==========================================
 
 $query = @"
@@ -208,58 +259,94 @@ WHERE EventType = 2
 "@
 
 try {
+    # Remove any stale subscription created by a previous run in this
+    # PowerShell process/session.
+    Unregister-Event `
+        -SourceIdentifier "TayproUSBDetection" `
+        -ErrorAction SilentlyContinue
 
     Register-WmiEvent `
         -Query $query `
         -SourceIdentifier "TayproUSBDetection" `
-        -ErrorAction Stop
+        -Namespace "root\CIMV2" `
+        -ErrorAction Stop | Out-Null
 
+    Write-Log "USB insertion event registered successfully."
 }
 catch {
-
     Write-Log "ERROR registering USB event: $($_.Exception.Message)"
-
     exit 1
 }
+
+# ==========================================
+# MONITOR CLEANUP
+# ==========================================
+
+$Cleanup = {
+    try {
+        Unregister-Event `
+            -SourceIdentifier "TayproUSBDetection" `
+            -ErrorAction SilentlyContinue
+
+        Remove-Event `
+            -SourceIdentifier "TayproUSBDetection" `
+            -ErrorAction SilentlyContinue
+    }
+    catch {
+    }
+}
+
+# ==========================================
+# START MONITOR
+# ==========================================
+
+Write-Log "TAYPRO USB SECURITY MONITOR STARTED"
+Write-Log "Waiting for USB storage device insertion..."
 
 # ==========================================
 # CONTINUOUS MONITORING
 # ==========================================
 
-while ($true) {
+try {
+    while ($true) {
 
-    try {
+        try {
+            $Event = Wait-Event `
+                -SourceIdentifier "TayproUSBDetection" `
+                -Timeout 30
 
-        $Event = Wait-Event `
-            -SourceIdentifier "TayproUSBDetection"
-
-        if ($Event) {
+            if ($null -eq $Event) {
+                continue
+            }
 
             try {
-
-                $DriveLetter =
-                    $Event.SourceEventArgs.NewEvent.DriveName
+                $DriveLetter = $Event.SourceEventArgs.NewEvent.DriveName
 
                 Start-Sleep -Seconds 2
 
-                if ($DriveLetter) {
+                if (-not [string]::IsNullOrWhiteSpace($DriveLetter)) {
 
-                    $Volume = Get-CimInstance Win32_LogicalDisk `
-                        -Filter "DeviceID='$DriveLetter'"
+                    $SafeDriveLetter = $DriveLetter.Replace("'", "''")
+
+                    $Volume = Get-CimInstance `
+                        Win32_LogicalDisk `
+                        -Filter "DeviceID='$SafeDriveLetter'" `
+                        -ErrorAction SilentlyContinue
 
                     if ($Volume) {
 
-                        $VolumeName = $Volume.VolumeName
+                        $VolumeName = [string]$Volume.VolumeName
 
                         Send-USBAlert `
                             -DriveLetter $DriveLetter `
                             -VolumeName $VolumeName
                     }
+                    else {
+                        Write-Log "USB event received but logical disk was not available: $DriveLetter"
+                    }
                 }
-
             }
             catch {
-
                 Write-Log "USB EVENT ERROR: $($_.Exception.Message)"
             }
 
@@ -267,12 +354,13 @@ while ($true) {
                 -SourceIdentifier "TayproUSBDetection" `
                 -ErrorAction SilentlyContinue
         }
-
+        catch {
+            Write-Log "MONITOR ERROR: $($_.Exception.Message)"
+            Start-Sleep -Seconds 5
+        }
     }
-    catch {
-
-        Write-Log "MONITOR ERROR: $($_.Exception.Message)"
-
-        Start-Sleep -Seconds 5
-    }
+}
+finally {
+    & $Cleanup
+    Write-Log "TAYPRO USB SECURITY MONITOR STOPPED"
 }

@@ -1321,40 +1321,24 @@ public static class TayproNativeDPAPI
 Write-Host "DPAPI loaded successfully." -ForegroundColor Green
 
 # ==========================================
-# REQUEST SMTP PASSWORD
+# SMTP PASSWORD
 # ==========================================
 
-Write-Host ""
-Write-Host "Enter the Hostinger SMTP password." -ForegroundColor Yellow
-
-$SecurePassword = Read-Host `
-    "SMTP Password" `
-    -AsSecureString
-
-# Convert SecureString to plaintext only temporarily
-$BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(
-    $SecurePassword
-)
-
-try {
-
-    $PlainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
-        $BSTR
-    )
-}
-finally {
-
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(
-        $BSTR
-    )
-}
+# ENTER YOUR SMTP PASSWORD BETWEEN THE QUOTES
+$PlainPassword = ""
 
 if ([string]::IsNullOrWhiteSpace($PlainPassword)) {
-    throw "SMTP password cannot be empty."
+    Write-Host ""
+    Write-Host "ERROR: SMTP password is empty." -ForegroundColor Red
+    Write-Host "Please edit Install.ps1 and set the SMTP password." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
 }
 
+Write-Host "SMTP password loaded from installer." -ForegroundColor Green
+
 # ==========================================
-# ENCRYPT SMTP PASSWORD
+# ENCRYPT SMTP PASSWORD USING NATIVE DPAPI
 # ==========================================
 
 Write-Host ""
@@ -1383,12 +1367,11 @@ Set-Content `
 
 Write-Host "SMTP credential encrypted successfully." -ForegroundColor Green
 
-# Clear temporary password data
+# Clear plaintext password from memory
 $PlainPassword = $null
 $PasswordBytes = $null
 $EncryptedBytes = $null
 $EncryptedPassword = $null
-$SecurePassword = $null
 
 # ==========================================
 # FILE PERMISSIONS

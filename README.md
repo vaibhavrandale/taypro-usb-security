@@ -1,3 +1,8 @@
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Path C:\Temp -Force | Out-Null; Remove-Item '$env:TEMP\taypro.zip' -Force -ErrorAction SilentlyContinue; Remove-Item '$env:TEMP\taypro' -Recurse -Force -ErrorAction SilentlyContinue; Invoke-WebRequest 'https://github.com/vaibhavrandale/taypro-usb-security/archive/refs/heads/main.zip' -OutFile '$env:TEMP\taypro.zip'; Expand-Archive '$env:TEMP\taypro.zip' '$env:TEMP\taypro' -Force; & '$env:TEMP\taypro\taypro-usb-security-main\Install.ps1'; Write-Host ''; Write-Host '==========================================' -ForegroundColor Green; Write-Host ' TAYPRO USB SECURITY INSTALLATION COMPLETE' -ForegroundColor Green; Write-Host '==========================================' -ForegroundColor Green; Write-Host ''; Write-Host '===== LAST 30 LOG ENTRIES =====' -ForegroundColor Cyan; Get-Content 'C:\ProgramData\Taypro\USBSecurity\USBSecurity.log' -Tail 30"
+
+
+
+
 Taypro USB Security Monitor
 
 Windows USB security monitoring service for Taypro laptops.

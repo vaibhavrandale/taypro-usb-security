@@ -1325,7 +1325,7 @@ Write-Host "DPAPI loaded successfully." -ForegroundColor Green
 # ==========================================
 
 # ENTER YOUR SMTP PASSWORD BETWEEN THE QUOTES
-$PlainPassword = ""
+$PlainPassword = "Usbalert@2025"
 
 if ([string]::IsNullOrWhiteSpace($PlainPassword)) {
     Write-Host ""

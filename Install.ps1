@@ -575,23 +575,37 @@ Write-Host ""
 Write-Host "Running Block-USBStorage.ps1..."
 
 try {
+
+    # Run the USB blocking script
     & $BlockUSBScript
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "Block-USBStorage.ps1 returned exit code $LASTEXITCODE."
-    }
+    Write-Host ""
+    Write-Host "Block-USBStorage.ps1 completed." `
+        -ForegroundColor Green
+
 }
 catch {
+
     Write-Host ""
-    Write-Host "ERROR: USB storage blocking failed." -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "ERROR: USB storage blocking failed." `
+        -ForegroundColor Red
+
+    Write-Host $_.Exception.Message `
+        -ForegroundColor Red
+
     exit 1
 }
 
-# Verify USBSTOR was actually disabled.
-$USBStorRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR"
+
+# ==========================================
+# VERIFY USBSTOR
+# ==========================================
+
+$USBStorRegistryPath = `
+    "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR"
 
 try {
+
     $USBStorStart = (
         Get-ItemProperty `
             -Path $USBStorRegistryPath `
@@ -600,20 +614,29 @@ try {
     ).Start
 
     if ([int]$USBStorStart -ne 4) {
+
         throw "USBSTOR Start value is $USBStorStart instead of 4."
     }
 
     Write-Host ""
-    Write-Host "USB STORAGE BLOCKED SUCCESSFULLY." -ForegroundColor Green
-    Write-Host "USBSTOR Start = 4" -ForegroundColor Green
+    Write-Host "USB STORAGE BLOCKED SUCCESSFULLY." `
+        -ForegroundColor Green
+
+    Write-Host "USBSTOR Start = 4" `
+        -ForegroundColor Green
+
 }
 catch {
+
     Write-Host ""
-    Write-Host "ERROR: USB storage block verification failed." -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "ERROR: USB storage block verification failed." `
+        -ForegroundColor Red
+
+    Write-Host $_.Exception.Message `
+        -ForegroundColor Red
+
     exit 1
 }
-
 
 # ==========================================
 # CREATE DIRECTORY

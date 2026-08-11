@@ -2,6 +2,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType D
 
 
 
+Get-Content "C:\ProgramData\Taypro\USBSecurity\USBSecurity.log" -Tail 30
+
+
+
 
 Taypro USB Security Monitor
 

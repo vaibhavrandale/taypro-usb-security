@@ -1,26 +1,21 @@
+
+
 # #Requires -Version 5.1
 
 # # ==========================================
 # # TAYPRO USB SECURITY MONITOR
-# # USB STORAGE INSERTION ALERT
+# # USB / PnP INSERTION ALERT
 # # ==========================================
 
-# $BasePath      = "C:\ProgramData\Taypro\USBSecurity"
-# $ConfigFile    = Join-Path $BasePath "settings.json"
+# $ErrorActionPreference = "Stop"
+
+# $BasePath       = "C:\ProgramData\Taypro\USBSecurity"
+# $ConfigFile     = Join-Path $BasePath "settings.json"
 # $CredentialFile = Join-Path $BasePath "smtp-secret.dat"
-# $LogFile       = Join-Path $BasePath "USBSecurity.log"
-
-# # Polling interval in seconds
-# $PollIntervalSeconds = 2
-
-# # Number of attempts to wait for the USB volume to become ready
-# $VolumeReadyAttempts = 10
-
-# # Delay between volume-ready attempts
-# $VolumeReadyDelaySeconds = 1
+# $LogFile        = Join-Path $BasePath "USBSecurity.log"
 
 # # ==========================================
-# # CREATE BASE DIRECTORY
+# # CREATE DIRECTORY
 # # ==========================================
 
 # if (-not (Test-Path $BasePath)) {
@@ -28,7 +23,7 @@
 # }
 
 # # ==========================================
-# # LOG FUNCTION
+# # LOGGING
 # # ==========================================
 
 # function Write-Log {
@@ -46,20 +41,21 @@
 #             -ErrorAction Stop
 #     }
 #     catch {
-#         # Do not terminate the USB monitor if logging fails.
+#         # Never terminate monitor because logging failed.
 #     }
 # }
 
 # # ==========================================
-# # LOAD CONFIGURATION
+# # LOAD CONFIG
 # # ==========================================
 
 # if (-not (Test-Path $ConfigFile)) {
-#     Write-Log "ERROR: settings.json not found: $ConfigFile"
+#     Write-Log "ERROR: settings.json not found."
 #     exit 1
 # }
 
 # try {
+
 #     $Config = Get-Content `
 #         -Path $ConfigFile `
 #         -Raw `
@@ -91,58 +87,223 @@
 #     $From       = [string]$Config.From
 #     $To         = [string]$Config.To
 #     $AuthUser   = [string]$Config.AuthUser
+
 # }
 # catch {
+
 #     Write-Log "ERROR loading configuration: $($_.Exception.Message)"
 #     exit 1
 # }
 
 # # ==========================================
-# # LOAD ENCRYPTED SMTP PASSWORD
+# # NATIVE WINDOWS DPAPI
+# # ==========================================
+
+# if (-not ("TayproNativeDPAPI" -as [type])) {
+
+#     Add-Type @"
+# using System;
+# using System.Runtime.InteropServices;
+
+# public static class TayproNativeDPAPI
+# {
+#     [StructLayout(LayoutKind.Sequential)]
+#     public struct DATA_BLOB
+#     {
+#         public int cbData;
+#         public IntPtr pbData;
+#     }
+
+#     [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+#     private static extern bool CryptProtectData(
+#         ref DATA_BLOB pDataIn,
+#         string szDataDescr,
+#         IntPtr pOptionalEntropy,
+#         IntPtr pvReserved,
+#         IntPtr pPromptStruct,
+#         uint dwFlags,
+#         out DATA_BLOB pDataOut
+#     );
+
+#     [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+#     private static extern bool CryptUnprotectData(
+#         ref DATA_BLOB pDataIn,
+#         IntPtr ppszDataDescr,
+#         IntPtr pOptionalEntropy,
+#         IntPtr pvReserved,
+#         IntPtr pPromptStruct,
+#         uint dwFlags,
+#         out DATA_BLOB pDataOut
+#     );
+
+#     [DllImport("kernel32.dll", SetLastError = true)]
+#     private static extern IntPtr LocalFree(IntPtr hMem);
+
+#     private const uint CRYPTPROTECT_LOCAL_MACHINE = 0x4;
+
+#     public static byte[] Protect(byte[] plainBytes)
+#     {
+#         DATA_BLOB input = new DATA_BLOB();
+#         DATA_BLOB output;
+
+#         input.cbData = plainBytes.Length;
+#         input.pbData = Marshal.AllocHGlobal(plainBytes.Length);
+
+#         try
+#         {
+#             Marshal.Copy(plainBytes, 0, input.pbData, plainBytes.Length);
+
+#             bool result = CryptProtectData(
+#                 ref input,
+#                 "Taypro USB Security SMTP Credential",
+#                 IntPtr.Zero,
+#                 IntPtr.Zero,
+#                 IntPtr.Zero,
+#                 CRYPTPROTECT_LOCAL_MACHINE,
+#                 out output
+#             );
+
+#             if (!result)
+#             {
+#                 throw new System.ComponentModel.Win32Exception(
+#                     Marshal.GetLastWin32Error()
+#                 );
+#             }
+
+#             byte[] encrypted = new byte[output.cbData];
+
+#             Marshal.Copy(
+#                 output.pbData,
+#                 encrypted,
+#                 0,
+#                 output.cbData
+#             );
+
+#             LocalFree(output.pbData);
+
+#             return encrypted;
+#         }
+#         finally
+#         {
+#             if (input.pbData != IntPtr.Zero)
+#             {
+#                 Marshal.FreeHGlobal(input.pbData);
+#             }
+#         }
+#     }
+
+#     public static byte[] Unprotect(byte[] encryptedBytes)
+#     {
+#         DATA_BLOB input = new DATA_BLOB();
+#         DATA_BLOB output;
+
+#         input.cbData = encryptedBytes.Length;
+#         input.pbData = Marshal.AllocHGlobal(encryptedBytes.Length);
+
+#         try
+#         {
+#             Marshal.Copy(
+#                 encryptedBytes,
+#                 0,
+#                 input.pbData,
+#                 encryptedBytes.Length
+#             );
+
+#             bool result = CryptUnprotectData(
+#                 ref input,
+#                 IntPtr.Zero,
+#                 IntPtr.Zero,
+#                 IntPtr.Zero,
+#                 IntPtr.Zero,
+#                 0,
+#                 out output
+#             );
+
+#             if (!result)
+#             {
+#                 throw new System.ComponentModel.Win32Exception(
+#                     Marshal.GetLastWin32Error()
+#                 );
+#             }
+
+#             byte[] plain = new byte[output.cbData];
+
+#             Marshal.Copy(
+#                 output.pbData,
+#                 plain,
+#                 0,
+#                 output.cbData
+#             );
+
+#             LocalFree(output.pbData);
+
+#             return plain;
+#         }
+#         finally
+#         {
+#             if (input.pbData != IntPtr.Zero)
+#             {
+#                 Marshal.FreeHGlobal(input.pbData);
+#             }
+#         }
+#     }
+# }
+# "@
+# }
+
+# # ==========================================
+# # LOAD SMTP PASSWORD
 # # ==========================================
 
 # if (-not (Test-Path $CredentialFile)) {
-#     Write-Log "ERROR: SMTP credential not found: $CredentialFile"
+
+#     Write-Log "ERROR: smtp-secret.dat not found."
 #     exit 1
 # }
 
 # try {
-#     Add-Type -AssemblyName System.Security -ErrorAction Stop
 
-#     $EncryptedPassword = (
+#     $EncryptedBase64 = (
 #         Get-Content `
 #             -Path $CredentialFile `
 #             -Raw `
 #             -ErrorAction Stop
 #     ).Trim()
 
-#     if ([string]::IsNullOrWhiteSpace($EncryptedPassword)) {
-#         throw "SMTP credential file is empty."
+#     if ([string]::IsNullOrWhiteSpace($EncryptedBase64)) {
+#         throw "Encrypted SMTP credential is empty."
 #     }
 
-#     $EncryptedBytes = [Convert]::FromBase64String($EncryptedPassword)
-
-#     $PasswordBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
-#         $EncryptedBytes,
-#         $null,
-#         [System.Security.Cryptography.DataProtectionScope]::LocalMachine
+#     $EncryptedBytes = [Convert]::FromBase64String(
+#         $EncryptedBase64
 #     )
 
-#     $Password = [System.Text.Encoding]::UTF8.GetString($PasswordBytes)
+#     $PasswordBytes = [TayproNativeDPAPI]::Unprotect(
+#         $EncryptedBytes
+#     )
+
+#     $Password = [System.Text.Encoding]::UTF8.GetString(
+#         $PasswordBytes
+#     )
 
 #     if ([string]::IsNullOrWhiteSpace($Password)) {
-#         throw "Decrypted SMTP password is empty."
+#         throw "SMTP password decrypted to an empty value."
 #     }
 
-#     # Clear sensitive intermediate data
-#     $PasswordBytes = $null
-#     $EncryptedBytes = $null
-#     $EncryptedPassword = $null
+#     Write-Log "SMTP credential decrypted successfully using native Windows DPAPI."
+
 # }
 # catch {
-#     Write-Log "ERROR decrypting SMTP password: $($_.Exception.Message)"
+
+#     Write-Log "ERROR decrypting SMTP credential: $($_.Exception.Message)"
 #     exit 1
 # }
+
+# # ==========================================
+# # GET COMPUTER NAME
+# # ==========================================
+
+# $ComputerName = $env:COMPUTERNAME
 
 # # ==========================================
 # # GET LOGGED-IN USER
@@ -151,343 +312,340 @@
 # function Get-LoggedInUser {
 
 #     try {
+
 #         $ComputerSystem = Get-CimInstance `
 #             -ClassName Win32_ComputerSystem `
 #             -ErrorAction Stop
 
-#         if (-not [string]::IsNullOrWhiteSpace($ComputerSystem.UserName)) {
+#         if (-not [string]::IsNullOrWhiteSpace(
+#             $ComputerSystem.UserName
+#         )) {
 #             return $ComputerSystem.UserName
 #         }
 
 #         return "No interactive user detected"
+
 #     }
 #     catch {
+
 #         return "Unknown"
 #     }
 # }
 
 # # ==========================================
-# # GET USB STORAGE DRIVES
+# # GET USB DEVICE DETAILS
 # # ==========================================
 
-# function Get-USBDrives {
+# function Get-USBDeviceDetails {
+
+#     param(
+#         [Parameter(Mandatory = $true)]
+#         [string]$PNPDeviceID
+#     )
 
 #     try {
 
-#         $Drives = Get-CimInstance `
-#             -ClassName Win32_LogicalDisk `
-#             -Filter "DriveType = 2" `
-#             -ErrorAction Stop
+#         $EscapedId = $PNPDeviceID.Replace("\", "\\").Replace("'", "''")
 
-#         if ($null -eq $Drives) {
-#             return @()
+#         $Device = Get-CimInstance `
+#             -ClassName Win32_PnPEntity `
+#             -Filter "PNPDeviceID='$EscapedId'" `
+#             -ErrorAction SilentlyContinue |
+#             Select-Object -First 1
+
+#         if ($Device) {
+
+#             return [PSCustomObject]@{
+#                 Name        = if ($Device.Name) { $Device.Name } else { "Unknown" }
+#                 Description = if ($Device.Description) { $Device.Description } else { "Unknown" }
+#                 Manufacturer = if ($Device.Manufacturer) { $Device.Manufacturer } else { "Unknown" }
+#                 DeviceID    = if ($Device.PNPDeviceID) { $Device.PNPDeviceID } else { $PNPDeviceID }
+#                 Status      = if ($Device.Status) { $Device.Status } else { "Unknown" }
+#                 Class       = if ($Device.PNPClass) { $Device.PNPClass } else { "Unknown" }
+#             }
 #         }
 
-#         return @($Drives)
 #     }
 #     catch {
+#     }
 
-#         Write-Log "USB ENUMERATION ERROR: $($_.Exception.Message)"
-
-#         return @()
+#     return [PSCustomObject]@{
+#         Name         = "USB Device"
+#         Description  = "USB device"
+#         Manufacturer = "Unknown"
+#         DeviceID     = $PNPDeviceID
+#         Status       = "Unknown"
+#         Class        = "Unknown"
 #     }
 # }
 
 # # ==========================================
-# # SEND USB ALERT EMAIL
+# # SEND EMAIL
 # # ==========================================
-
 # function Send-USBAlert {
 
 #     param(
 #         [Parameter(Mandatory = $true)]
-#         [string]$DriveLetter,
-
-#         [string]$VolumeName,
-
-#         [string]$FileSystem,
-
-#         [string]$VolumeSerialNumber,
-
-#         [string]$SizeGB
+#         $Device
 #     )
 
-#     $ComputerName = $env:COMPUTERNAME
-#     $UserName = Get-LoggedInUser
 #     $Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-
-#     if ([string]::IsNullOrWhiteSpace($VolumeName)) {
-#         $VolumeName = "No label"
-#     }
-
-#     if ([string]::IsNullOrWhiteSpace($FileSystem)) {
-#         $FileSystem = "Unknown"
-#     }
-
-#     if ([string]::IsNullOrWhiteSpace($VolumeSerialNumber)) {
-#         $VolumeSerialNumber = "Unknown"
-#     }
-
-#     if ([string]::IsNullOrWhiteSpace($SizeGB)) {
-#         $SizeGB = "Unknown"
-#     }
+#     $UserName = Get-LoggedInUser
 
 #     $Subject = "USB DEVICE DETECTED - $ComputerName"
 
 #     $Body = @"
-# USB SECURITY ALERT
-# ==================
+# TAYPRO USB SECURITY ALERT
+# =========================
 
-# A USB storage device has been connected to the computer.
+# A USB device has been connected to the computer.
 
-# Computer Name      : $ComputerName
-# Logged-in User     : $UserName
-# Drive Letter       : $DriveLetter
-# Volume Name        : $VolumeName
-# File System        : $FileSystem
-# Volume Serial      : $VolumeSerialNumber
-# Drive Size         : $SizeGB GB
-# Detection Time     : $Time
+# Computer Name : $ComputerName
+# Logged-in User: $UserName
+
+# Device Name   : $($Device.Name)
+# Description   : $($Device.Description)
+# Manufacturer  : $($Device.Manufacturer)
+# Device Class  : $($Device.Class)
+# Device Status : $($Device.Status)
+
+# Device ID:
+# $($Device.DeviceID)
+
+# Detection Time: $Time
+
+# USB storage blocking remains active.
 
 # This is an automated USB security alert generated by Taypro.
 # "@
 
-#     Write-Log "USB DETECTED | Computer=$ComputerName | User=$UserName | Drive=$DriveLetter | Volume=$VolumeName"
+#     Write-Log "USB DETECTED | Computer=$ComputerName | User=$UserName | Device=$($Device.Name) | PNPDeviceID=$($Device.DeviceID)"
 
-#     $Smtp = $null
-#     $Message = $null
+#     $smtp = $null
+#     $msg = $null
+#     $networkCredential = $null
 
 #     try {
 
-#         $SecurePassword = ConvertTo-SecureString `
-#             -String $Password `
+#         # ==========================================
+#         # SMTP CREDENTIAL
+#         # ==========================================
+
+#         $securePassword = ConvertTo-SecureString `
+#             $Password `
 #             -AsPlainText `
 #             -Force
 
-#         $Credential = New-Object `
+#         $smtpCredential = New-Object `
 #             System.Management.Automation.PSCredential(
 #                 $AuthUser,
-#                 $SecurePassword
+#                 $securePassword
 #             )
 
-#         $Smtp = New-Object `
+#         # ==========================================
+#         # SMTP CLIENT
+#         # SAME CONFIGURATION AS SUCCESSFUL TEST
+#         # ==========================================
+
+#         $smtp = New-Object `
 #             System.Net.Mail.SmtpClient(
-#                 $SmtpServer,
-#                 $SmtpPort
+#                 "smtp.hostinger.com",
+#                 587
 #             )
 
-#         $Smtp.EnableSsl = $true
-#         $Smtp.Timeout = 15000
-#         $Smtp.UseDefaultCredentials = $false
-#         $Smtp.Credentials = $Credential.GetNetworkCredential()
+#         $smtp.EnableSsl = $true
+#         $smtp.UseDefaultCredentials = $false
 
-#         $Message = New-Object System.Net.Mail.MailMessage
+#         $networkCredential = $smtpCredential.GetNetworkCredential()
 
-#         $Message.From = $From
-#         $Message.To.Add($To)
-#         $Message.Subject = $Subject
-#         $Message.Body = $Body
-#         $Message.IsBodyHtml = $false
+#         $smtp.Credentials = $networkCredential
 
-#         $Smtp.Send($Message)
+#         $smtp.Timeout = 15000
 
-#         Write-Log "EMAIL SENT SUCCESSFULLY | Drive=$DriveLetter | To=$To"
+#         # ==========================================
+#         # MESSAGE
+#         # ==========================================
+
+#         $msg = New-Object `
+#             System.Net.Mail.MailMessage
+
+#         $msg.From = $From
+
+#         $msg.To.Add($To)
+
+#         $msg.Subject = $Subject
+
+#         $msg.Body = $Body
+
+#         $msg.IsBodyHtml = $false
+
+#         # ==========================================
+#         # SEND
+#         # ==========================================
+
+#         Write-Log "Attempting SMTP send | Server=smtp.hostinger.com | Port=587 | User=$AuthUser"
+
+#         $smtp.Send($msg)
+
+#         Write-Log "EMAIL SENT SUCCESSFULLY | Device=$($Device.Name) | To=$To"
 
 #         return $true
+
 #     }
 #     catch {
 
-#         Write-Log "EMAIL FAILED | Drive=$DriveLetter | Error=$($_.Exception.Message)"
+#         Write-Log "EMAIL FAILED | Device=$($Device.Name) | Error=$($_.Exception.ToString())"
 
 #         return $false
 #     }
 #     finally {
 
-#         if ($Message) {
-#             $Message.Dispose()
+#         if ($msg) {
+#             $msg.Dispose()
 #         }
 
-#         if ($Smtp) {
-#             $Smtp.Dispose()
+#         if ($smtp) {
+#             $smtp.Dispose()
 #         }
 
-#         $SecurePassword = $null
-#         $Credential = $null
+#         $networkCredential = $null
+#         $securePassword = $null
+#         $smtpCredential = $null
 #     }
 # }
 
 # # ==========================================
-# # WAIT FOR USB VOLUME TO BECOME READY
+# # GET INITIAL USB DEVICES
 # # ==========================================
 
-# function Get-ReadyUSBDrive {
+# function Get-CurrentUSBDevices {
 
-#     param(
-#         [Parameter(Mandatory = $true)]
-#         [string]$DriveLetter
-#     )
+#     try {
 
-#     for ($Attempt = 1; $Attempt -le $VolumeReadyAttempts; $Attempt++) {
-
-#         try {
-
-#             $Drive = Get-CimInstance `
-#                 -ClassName Win32_LogicalDisk `
-#                 -Filter "DeviceID='$DriveLetter'" `
-#                 -ErrorAction Stop
-
-#             if ($Drive) {
-#                 return $Drive
+#         $Devices = Get-CimInstance `
+#             -ClassName Win32_PnPEntity `
+#             -ErrorAction Stop |
+#             Where-Object {
+#                 $_.PNPDeviceID -like "USB\*"
 #             }
-#         }
-#         catch {
-#             # USB may still be initializing.
+
+#         if ($null -eq $Devices) {
+#             return @()
 #         }
 
-#         Start-Sleep -Seconds $VolumeReadyDelaySeconds
+#         return @(
+#             $Devices |
+#             ForEach-Object {
+#                 $_.PNPDeviceID
+#             }
+#         )
 #     }
+#     catch {
 
-#     return $null
+#         Write-Log "USB ENUMERATION ERROR: $($_.Exception.Message)"
+#         return @()
+#     }
 # }
 
 # # ==========================================
-# # START MONITOR
+# # STARTUP LOG
 # # ==========================================
 
 # Write-Log "=========================================="
 # Write-Log "TAYPRO USB SECURITY MONITOR STARTED"
-# Write-Log "Computer: $env:COMPUTERNAME"
+# Write-Log "Computer: $ComputerName"
 # Write-Log "Running As: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-# Write-Log "Detection Method: USB storage polling"
-# Write-Log "Polling Interval: $PollIntervalSeconds seconds"
+# Write-Log "Detection Method: USB/PnP device monitoring"
+# Write-Log "USB storage blocking remains enabled."
 # Write-Log "=========================================="
 
 # # ==========================================
-# # INITIAL USB STATE
+# # INITIAL DEVICE SNAPSHOT
 # # ==========================================
 
-# $KnownDrives = @{}
+# $KnownDevices = @{}
 
 # try {
 
-#     $InitialDrives = Get-USBDrives
+#     $InitialDevices = Get-CurrentUSBDevices
 
-#     foreach ($Drive in $InitialDrives) {
+#     foreach ($DeviceId in $InitialDevices) {
 
-#         if ($Drive.DeviceID) {
-#             $KnownDrives[$Drive.DeviceID] = $true
-
-#             Write-Log "INITIAL USB DRIVE | Drive=$($Drive.DeviceID) | Volume=$($Drive.VolumeName)"
+#         if (-not [string]::IsNullOrWhiteSpace($DeviceId)) {
+#             $KnownDevices[$DeviceId] = $true
 #         }
 #     }
+
+#     Write-Log "INITIAL USB DEVICES: $($KnownDevices.Count)"
 
 # }
 # catch {
 
-#     Write-Log "INITIAL USB ENUMERATION ERROR: $($_.Exception.Message)"
+#     Write-Log "ERROR creating initial USB device snapshot: $($_.Exception.Message)"
 # }
 
 # Write-Log "USB monitoring loop is active."
 
 # # ==========================================
-# # CONTINUOUS USB MONITOR
+# # MAIN MONITOR LOOP
 # # ==========================================
 
 # while ($true) {
 
 #     try {
 
-#         $CurrentDrives = Get-USBDrives
+#         $CurrentDevices = Get-CurrentUSBDevices
 
-#         $CurrentDriveMap = @{}
+#         $CurrentSet = @{}
 
-#         foreach ($Drive in $CurrentDrives) {
+#         foreach ($DeviceId in $CurrentDevices) {
 
-#             $DriveLetter = [string]$Drive.DeviceID
-
-#             if ([string]::IsNullOrWhiteSpace($DriveLetter)) {
+#             if ([string]::IsNullOrWhiteSpace($DeviceId)) {
 #                 continue
 #             }
 
-#             $CurrentDriveMap[$DriveLetter] = $true
+#             $CurrentSet[$DeviceId] = $true
 
-#             # ==========================================
-#             # NEW USB DRIVE DETECTED
-#             # ==========================================
+#             # New USB device
+#             if (-not $KnownDevices.ContainsKey($DeviceId)) {
 
-#             if (-not $KnownDrives.ContainsKey($DriveLetter)) {
+#                 Start-Sleep -Milliseconds 500
 
-#                 Write-Log "NEW USB DRIVE FOUND | Drive=$DriveLetter"
+#                 $Device = Get-USBDeviceDetails `
+#                     -PNPDeviceID $DeviceId
 
-#                 # Give Windows time to finish mounting the device.
-#                 $ReadyDrive = Get-ReadyUSBDrive `
-#                     -DriveLetter $DriveLetter
+#                 Write-Log "NEW USB DEVICE | Name=$($Device.Name) | Manufacturer=$($Device.Manufacturer) | Class=$($Device.Class) | DeviceID=$DeviceId"
 
-#                 if ($ReadyDrive) {
-
-#                     $VolumeName = [string]$ReadyDrive.VolumeName
-#                     $FileSystem = [string]$ReadyDrive.FileSystem
-#                     $Serial = [string]$ReadyDrive.VolumeSerialNumber
-
-#                     $SizeGB = "Unknown"
-
-#                     if ($ReadyDrive.Size) {
-#                         $SizeGB = [math]::Round(
-#                             ($ReadyDrive.Size / 1GB),
-#                             2
-#                         )
-#                     }
-
-#                     Write-Log "USB READY | Drive=$DriveLetter | Volume=$VolumeName | FileSystem=$FileSystem | SizeGB=$SizeGB"
-
-#                     Send-USBAlert `
-#                         -DriveLetter $DriveLetter `
-#                         -VolumeName $VolumeName `
-#                         -FileSystem $FileSystem `
-#                         -VolumeSerialNumber $Serial `
-#                         -SizeGB $SizeGB | Out-Null
-#                 }
-#                 else {
-
-#                     Write-Log "USB DETECTED BUT VOLUME NOT READY | Drive=$DriveLetter"
-#                 }
+#                 Send-USBAlert `
+#                     -Device $Device | Out-Null
 #             }
 #         }
 
-#         # ==========================================
-#         # REMOVE DISCONNECTED DRIVES
-#         # ==========================================
+#         # Detect removals
+#         foreach ($OldDeviceId in @($KnownDevices.Keys)) {
 
-#         $DisconnectedDrives = @(
-#             $KnownDrives.Keys |
-#             Where-Object {
-#                 -not $CurrentDriveMap.ContainsKey($_)
+#             if (-not $CurrentSet.ContainsKey($OldDeviceId)) {
+
+#                 Write-Log "USB DEVICE REMOVED | DeviceID=$OldDeviceId"
 #             }
-#         )
-
-#         foreach ($DisconnectedDrive in $DisconnectedDrives) {
-
-#             Write-Log "USB REMOVED | Drive=$DisconnectedDrive"
-
-#             $KnownDrives.Remove($DisconnectedDrive)
 #         }
 
-#         # ==========================================
-#         # UPDATE STATE
-#         # ==========================================
-
-#         foreach ($DriveLetter in $CurrentDriveMap.Keys) {
-#             $KnownDrives[$DriveLetter] = $true
-#         }
+#         $KnownDevices = $CurrentSet
 
 #     }
 #     catch {
 
-#         Write-Log "MONITOR ERROR: $($_.Exception.Message)"
+#         Write-Log "MONITOR LOOP ERROR: $($_.Exception.Message)"
 #     }
 
-#     Start-Sleep -Seconds $PollIntervalSeconds
+#     Start-Sleep -Seconds 2
 # }
+
+
+
+
+
+
 
 
 
@@ -824,56 +982,159 @@ function Get-LoggedInUser {
 }
 
 # ==========================================
-# GET USB DEVICE DETAILS
+# GET USB STORAGE DEVICE DETAILS
 # ==========================================
 
-function Get-USBDeviceDetails {
+function Get-USBStorageDeviceDetails {
 
     param(
         [Parameter(Mandatory = $true)]
-        [string]$PNPDeviceID
+        [string]$DeviceID
     )
 
     try {
 
-        $EscapedId = $PNPDeviceID.Replace("\", "\\").Replace("'", "''")
+        # Win32_DiskDrive is used here instead of Win32_PnPEntity.
+        # This is the important filter that prevents keyboard, mouse,
+        # HID, webcam, audio, HDMI, USB hub, etc. from generating alerts.
+        $EscapedId = $DeviceID.Replace("\", "\\").Replace("'", "''")
 
-        $Device = Get-CimInstance `
-            -ClassName Win32_PnPEntity `
-            -Filter "PNPDeviceID='$EscapedId'" `
+        $Disk = Get-CimInstance `
+            -ClassName Win32_DiskDrive `
+            -Filter "DeviceID='$EscapedId'" `
             -ErrorAction SilentlyContinue |
             Select-Object -First 1
 
-        if ($Device) {
+        if ($Disk) {
+
+            $DriveLetters = @()
+
+            try {
+
+                # Disk -> Partition -> Logical Disk
+                $Partitions = Get-CimAssociatedInstance `
+                    -InputObject $Disk `
+                    -ResultClassName Win32_DiskPartition `
+                    -ErrorAction SilentlyContinue
+
+                foreach ($Partition in @($Partitions)) {
+
+                    $LogicalDisks = Get-CimAssociatedInstance `
+                        -InputObject $Partition `
+                        -ResultClassName Win32_LogicalDisk `
+                        -ErrorAction SilentlyContinue
+
+                    foreach ($LogicalDisk in @($LogicalDisks)) {
+
+                        if ($LogicalDisk.DeviceID) {
+                            $DriveLetters += $LogicalDisk.DeviceID
+                        }
+                    }
+                }
+            }
+            catch {
+                # Drive-letter lookup is optional. Detection must continue.
+            }
+
+            $DriveLetterText = "No drive letter"
+
+            if ($DriveLetters.Count -gt 0) {
+                $DriveLetterText = (
+                    $DriveLetters |
+                    Sort-Object -Unique
+                ) -join ", "
+            }
+
+            $CapacityText = "Unknown"
+
+            if ($Disk.Size) {
+                try {
+                    $CapacityText = "{0:N2} GB" -f (
+                        [double]$Disk.Size / 1GB
+                    )
+                }
+                catch {
+                    $CapacityText = "Unknown"
+                }
+            }
+
+            $DeviceClass = "DiskDrive"
+
+            if ($Disk.PNPDeviceID -like "USBSTOR\*") {
+                $DeviceClass = "USBSTOR"
+            }
 
             return [PSCustomObject]@{
-                Name        = if ($Device.Name) { $Device.Name } else { "Unknown" }
-                Description = if ($Device.Description) { $Device.Description } else { "Unknown" }
-                Manufacturer = if ($Device.Manufacturer) { $Device.Manufacturer } else { "Unknown" }
-                DeviceID    = if ($Device.PNPDeviceID) { $Device.PNPDeviceID } else { $PNPDeviceID }
-                Status      = if ($Device.Status) { $Device.Status } else { "Unknown" }
-                Class       = if ($Device.PNPClass) { $Device.PNPClass } else { "Unknown" }
+                Name          = if ($Disk.Model) {
+                    [string]$Disk.Model
+                } else {
+                    "USB Storage Device"
+                }
+
+                Description   = if ($Disk.MediaType) {
+                    [string]$Disk.MediaType
+                } else {
+                    "USB Mass Storage Device"
+                }
+
+                Manufacturer  = if ($Disk.Manufacturer) {
+                    [string]$Disk.Manufacturer
+                } else {
+                    "Unknown"
+                }
+
+                DeviceID      = if ($Disk.PNPDeviceID) {
+                    [string]$Disk.PNPDeviceID
+                } else {
+                    [string]$DeviceID
+                }
+
+                Status        = if ($Disk.Status) {
+                    [string]$Disk.Status
+                } else {
+                    "Unknown"
+                }
+
+                Class         = $DeviceClass
+
+                InterfaceType = if ($Disk.InterfaceType) {
+                    [string]$Disk.InterfaceType
+                } else {
+                    "USB"
+                }
+
+                Size          = $Disk.Size
+
+                Capacity      = $CapacityText
+
+                DriveLetters = $DriveLetterText
             }
         }
-
     }
     catch {
+        Write-Log "STORAGE DEVICE DETAIL ERROR: $($_.Exception.Message)"
     }
 
     return [PSCustomObject]@{
-        Name         = "USB Device"
-        Description  = "USB device"
-        Manufacturer = "Unknown"
-        DeviceID     = $PNPDeviceID
-        Status       = "Unknown"
-        Class        = "Unknown"
+        Name           = "USB Storage Device"
+        Description    = "USB Mass Storage Device"
+        Manufacturer   = "Unknown"
+        DeviceID       = $DeviceID
+        Status         = "Unknown"
+        Class          = "USBSTOR"
+        InterfaceType  = "USB"
+        Size           = $null
+        Capacity       = "Unknown"
+        DriveLetters   = "Unknown"
     }
 }
 
+
 # ==========================================
-# SEND EMAIL
+# SEND STORAGE DEVICE EMAIL
 # ==========================================
-function Send-USBAlert {
+
+function Send-USBStorageAlert {
 
     param(
         [Parameter(Mandatory = $true)]
@@ -883,22 +1144,27 @@ function Send-USBAlert {
     $Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $UserName = Get-LoggedInUser
 
-    $Subject = "USB DEVICE DETECTED - $ComputerName"
+    $Subject = "USB STORAGE DEVICE DETECTED - $ComputerName"
 
     $Body = @"
 TAYPRO USB SECURITY ALERT
 =========================
 
-A USB device has been connected to the computer.
+A USB STORAGE DEVICE has been connected to the computer.
 
 Computer Name : $ComputerName
 Logged-in User: $UserName
 
+Storage Device
+-------------------------
 Device Name   : $($Device.Name)
 Description   : $($Device.Description)
 Manufacturer  : $($Device.Manufacturer)
 Device Class  : $($Device.Class)
+Interface     : $($Device.InterfaceType)
 Device Status : $($Device.Status)
+Capacity      : $($Device.Capacity)
+Drive Letter  : $($Device.DriveLetters)
 
 Device ID:
 $($Device.DeviceID)
@@ -907,10 +1173,10 @@ Detection Time: $Time
 
 USB storage blocking remains active.
 
-This is an automated USB security alert generated by Taypro.
+This is an automated USB storage security alert generated by Taypro.
 "@
 
-    Write-Log "USB DETECTED | Computer=$ComputerName | User=$UserName | Device=$($Device.Name) | PNPDeviceID=$($Device.DeviceID)"
+    Write-Log "USB STORAGE DETECTED | Computer=$ComputerName | User=$UserName | Device=$($Device.Name) | Manufacturer=$($Device.Manufacturer) | Class=$($Device.Class) | PNPDeviceID=$($Device.DeviceID)"
 
     $smtp = $null
     $msg = $null
@@ -935,13 +1201,13 @@ This is an automated USB security alert generated by Taypro.
 
         # ==========================================
         # SMTP CLIENT
-        # SAME CONFIGURATION AS SUCCESSFUL TEST
+        # Uses settings.json values
         # ==========================================
 
         $smtp = New-Object `
             System.Net.Mail.SmtpClient(
-                "smtp.hostinger.com",
-                587
+                $SmtpServer,
+                $SmtpPort
             )
 
         $smtp.EnableSsl = $true
@@ -961,31 +1227,26 @@ This is an automated USB security alert generated by Taypro.
             System.Net.Mail.MailMessage
 
         $msg.From = $From
-
         $msg.To.Add($To)
-
         $msg.Subject = $Subject
-
         $msg.Body = $Body
-
         $msg.IsBodyHtml = $false
 
         # ==========================================
         # SEND
         # ==========================================
 
-        Write-Log "Attempting SMTP send | Server=smtp.hostinger.com | Port=587 | User=$AuthUser"
+        Write-Log "Attempting SMTP send | Server=$SmtpServer | Port=$SmtpPort | User=$AuthUser | StorageDevice=$($Device.Name)"
 
         $smtp.Send($msg)
 
-        Write-Log "EMAIL SENT SUCCESSFULLY | Device=$($Device.Name) | To=$To"
+        Write-Log "EMAIL SENT SUCCESSFULLY | StorageDevice=$($Device.Name) | To=$To"
 
         return $true
-
     }
     catch {
 
-        Write-Log "EMAIL FAILED | Device=$($Device.Name) | Error=$($_.Exception.ToString())"
+        Write-Log "EMAIL FAILED | StorageDevice=$($Device.Name) | Error=$($_.Exception.ToString())"
 
         return $false
     }
@@ -1005,38 +1266,69 @@ This is an automated USB security alert generated by Taypro.
     }
 }
 
+
 # ==========================================
-# GET INITIAL USB DEVICES
+# GET CURRENT USB STORAGE DEVICES
 # ==========================================
 
-function Get-CurrentUSBDevices {
+function Get-CurrentUSBStorageDevices {
 
     try {
 
-        $Devices = Get-CimInstance `
-            -ClassName Win32_PnPEntity `
+        # IMPORTANT:
+        # Do NOT use Win32_PnPEntity with PNPDeviceID -like "USB\*".
+        #
+        # That detects ALL USB PnP devices:
+        #   - Mouse
+        #   - Keyboard
+        #   - HID
+        #   - Webcam
+        #   - Audio
+        #   - USB Hub
+        #   - Composite devices
+        #
+        # Instead, enumerate physical disk drives and accept only
+        # USB storage devices.
+
+        $Disks = Get-CimInstance `
+            -ClassName Win32_DiskDrive `
             -ErrorAction Stop |
             Where-Object {
-                $_.PNPDeviceID -like "USB\*"
+
+                # Primary storage identification.
+                # USBSTOR is Windows' USB mass-storage device class.
+                (
+                    $_.PNPDeviceID -like "USBSTOR\*"
+                ) -or (
+                    $_.InterfaceType -eq "USB" -and
+                    $_.PNPDeviceID -like "USB\*"
+                )
             }
 
-        if ($null -eq $Devices) {
+        if ($null -eq $Disks) {
             return @()
         }
 
         return @(
-            $Devices |
+            $Disks |
             ForEach-Object {
-                $_.PNPDeviceID
+
+                [PSCustomObject]@{
+                    DeviceID    = [string]$_.DeviceID
+                    PNPDeviceID = [string]$_.PNPDeviceID
+                    Model       = [string]$_.Model
+                }
             }
         )
     }
     catch {
 
-        Write-Log "USB ENUMERATION ERROR: $($_.Exception.Message)"
+        Write-Log "USB STORAGE ENUMERATION ERROR: $($_.Exception.Message)"
+
         return @()
     }
 }
+
 
 # ==========================================
 # STARTUP LOG
@@ -1046,82 +1338,106 @@ Write-Log "=========================================="
 Write-Log "TAYPRO USB SECURITY MONITOR STARTED"
 Write-Log "Computer: $ComputerName"
 Write-Log "Running As: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-Write-Log "Detection Method: USB/PnP device monitoring"
+Write-Log "Detection Method: USB Storage / Win32_DiskDrive"
 Write-Log "USB storage blocking remains enabled."
+Write-Log "Keyboard, mouse, HID, HDMI, webcam, audio and other non-storage USB devices are ignored."
 Write-Log "=========================================="
 
+
 # ==========================================
-# INITIAL DEVICE SNAPSHOT
+# INITIAL STORAGE DEVICE SNAPSHOT
 # ==========================================
 
-$KnownDevices = @{}
+$KnownStorageDevices = @{}
 
 try {
 
-    $InitialDevices = Get-CurrentUSBDevices
+    $InitialDevices = Get-CurrentUSBStorageDevices
 
-    foreach ($DeviceId in $InitialDevices) {
+    foreach ($StorageDevice in $InitialDevices) {
 
-        if (-not [string]::IsNullOrWhiteSpace($DeviceId)) {
-            $KnownDevices[$DeviceId] = $true
+        $DeviceID = $StorageDevice.DeviceID
+
+        if (-not [string]::IsNullOrWhiteSpace($DeviceID)) {
+
+            $KnownStorageDevices[$DeviceID] = $true
         }
     }
 
-    Write-Log "INITIAL USB DEVICES: $($KnownDevices.Count)"
-
+    Write-Log "INITIAL USB STORAGE DEVICES: $($KnownStorageDevices.Count)"
 }
 catch {
 
-    Write-Log "ERROR creating initial USB device snapshot: $($_.Exception.Message)"
+    Write-Log "ERROR creating initial USB storage device snapshot: $($_.Exception.Message)"
 }
 
-Write-Log "USB monitoring loop is active."
+
+Write-Log "USB STORAGE monitoring loop is active."
+
 
 # ==========================================
-# MAIN MONITOR LOOP
+# MAIN STORAGE MONITOR LOOP
 # ==========================================
 
 while ($true) {
 
     try {
 
-        $CurrentDevices = Get-CurrentUSBDevices
+        $CurrentDevices = Get-CurrentUSBStorageDevices
 
         $CurrentSet = @{}
 
-        foreach ($DeviceId in $CurrentDevices) {
+        foreach ($StorageDevice in $CurrentDevices) {
 
-            if ([string]::IsNullOrWhiteSpace($DeviceId)) {
+            $DeviceID = $StorageDevice.DeviceID
+
+            if ([string]::IsNullOrWhiteSpace($DeviceID)) {
                 continue
             }
 
-            $CurrentSet[$DeviceId] = $true
+            $CurrentSet[$DeviceID] = $true
 
-            # New USB device
-            if (-not $KnownDevices.ContainsKey($DeviceId)) {
 
-                Start-Sleep -Milliseconds 500
+            # ==========================================
+            # NEW USB STORAGE DEVICE
+            # ==========================================
 
-                $Device = Get-USBDeviceDetails `
-                    -PNPDeviceID $DeviceId
+            if (-not $KnownStorageDevices.ContainsKey($DeviceID)) {
 
-                Write-Log "NEW USB DEVICE | Name=$($Device.Name) | Manufacturer=$($Device.Manufacturer) | Class=$($Device.Class) | DeviceID=$DeviceId"
+                # Give Windows a short amount of time to finish
+                # creating the disk/partition/drive associations.
+                Start-Sleep -Milliseconds 1000
 
-                Send-USBAlert `
-                    -Device $Device | Out-Null
+                $Device = Get-USBStorageDeviceDetails `
+                    -DeviceID $DeviceID
+
+                Write-Log "NEW USB STORAGE DEVICE | Name=$($Device.Name) | Manufacturer=$($Device.Manufacturer) | Class=$($Device.Class) | Drive=$($Device.DriveLetters) | DeviceID=$DeviceID"
+
+                Send-USBStorageAlert `
+                    -Device $Device |
+                    Out-Null
             }
         }
 
-        # Detect removals
-        foreach ($OldDeviceId in @($KnownDevices.Keys)) {
 
-            if (-not $CurrentSet.ContainsKey($OldDeviceId)) {
+        # ==========================================
+        # DETECT STORAGE DEVICE REMOVAL
+        # ==========================================
 
-                Write-Log "USB DEVICE REMOVED | DeviceID=$OldDeviceId"
+        foreach ($OldDeviceID in @($KnownStorageDevices.Keys)) {
+
+            if (-not $CurrentSet.ContainsKey($OldDeviceID)) {
+
+                Write-Log "USB STORAGE DEVICE REMOVED | DeviceID=$OldDeviceID"
             }
         }
 
-        $KnownDevices = $CurrentSet
+
+        # ==========================================
+        # UPDATE SNAPSHOT
+        # ==========================================
+
+        $KnownStorageDevices = $CurrentSet
 
     }
     catch {
@@ -1129,5 +1445,8 @@ while ($true) {
         Write-Log "MONITOR LOOP ERROR: $($_.Exception.Message)"
     }
 
+
+    # Poll every 2 seconds.
     Start-Sleep -Seconds 2
 }
+
